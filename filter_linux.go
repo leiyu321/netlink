@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"syscall"
 
 	"github.com/vishvananda/netlink/nl"
@@ -806,4 +807,74 @@ func SerializeRtab(rtab [256]uint32) []byte {
 	var w bytes.Buffer
 	_ = binary.Write(&w, native, rtab)
 	return w.Bytes()
+}
+
+func HandleByAddr(link Link, parent uint32, addr net.IP, netorep int) (uint32, error) {
+	return pkgHandle.HandleByAddr(link, parent, addr, netorep)
+}
+
+func (h *Handle) HandleByAddr(link Link, parent uint32, addr net.IP, netorep int) (uint32, error) {
+	req := h.newNetlinkRequest(unix.RTM_GETTFILTER, unix.NLM_F_DUMP)
+	msg := &nl.TcMsg{
+		Family: nl.FAMILY_ALL,
+		Parent: parent,
+	}
+	if link != nil {
+		base := link.Attrs()
+		h.ensureIndex(base)
+		msg.Ifindex = int32(base.Index)
+	}
+	req.AddData(msg)
+
+	msgs, err := req.Execute(unix.NETLINK_ROUTE, unix.RTM_NEWTFILTER)
+	if err != nil {
+		return 0, err
+	}
+
+	for _, m := range msgs {
+		msg := nl.DeserializeTcMsg(m)
+
+		attrs, err := nl.ParseRouteAttr(m[msg.Len():])
+		if err != nil {
+			return 0, err
+		}
+
+		filterType := ""
+		for _, attr := range attrs {
+			switch attr.Attr.Type {
+			case nl.TCA_KIND:
+				filterType = string(attr.Value[:len(attr.Value)-1])
+			case nl.TCA_OPTIONS:
+				data, err := nl.ParseRouteAttr(attr.Value)
+				if err != nil {
+					return 0, err
+				}
+				switch filterType {
+				case "u32":
+					native = nl.NativeEndian()
+					for _, datum := range data {
+						switch datum.Attr.Type {
+						case nl.TCA_U32_SEL:
+							sel := nl.DeserializeTcU32Sel(datum.Value)
+							if native != networkOrder {
+								for i, key := range sel.Keys {
+									sel.Keys[i].Mask = native.Uint32(htonl(key.Mask))
+									sel.Keys[i].Val = native.Uint32(htonl(key.Val))
+								}
+							}
+							if (sel.Nkeys == 2) &&
+								(sel.Keys[0].Mask == 0x0000ffff) &&
+								(sel.Keys[0].Val == uint32(addr[0])<<8+uint32(addr[1])) &&
+								(((netorep == 2) && (sel.Keys[1].Mask == 0xffff0000) && (sel.Keys[1].Val == uint32(addr[2])<<24+uint32(addr[3])<<16)) ||
+									((netorep == 1) && (sel.Keys[1].Mask == 0xff000000) && (sel.Keys[1].Val == uint32(addr[2])<<24))) {
+								return msg.Handle, nil
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return 0, fmt.Errorf("could not find handle for this filter")
 }
