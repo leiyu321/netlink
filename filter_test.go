@@ -10,6 +10,114 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestFilterCgroupAddDel(t *testing.T) {
+	tearDown := setUpNetlinkTest(t)
+	defer tearDown()
+	if err := LinkAdd(&Ifb{LinkAttrs{Name: "baz"}}); err != nil {
+		t.Fatal(err)
+	}
+	link, err := LinkByName("baz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := LinkSetUp(link); err != nil {
+		t.Fatal(err)
+	}
+	index := link.Attrs().Index
+
+	qdiscHandle := MakeHandle(0x1, 0x0)
+	qdiscAttrs := QdiscAttrs{
+		LinkIndex: index,
+		Handle:    qdiscHandle,
+		Parent:    HANDLE_ROOT,
+	}
+	qdisc := NewHtb(qdiscAttrs)
+	if err := QdiscAdd(qdisc); err != nil {
+		t.Fatal(err)
+	}
+	qdiscs, err := SafeQdiscList(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(qdiscs) != 1 {
+		t.Fatal("failed to add qdisc")
+	}
+	_, ok := qdiscs[0].(*Htb)
+	if !ok {
+		t.Fatal("qdisc wrong type")
+	}
+	handle := MakeHandle(0x1, 0x1)
+	//filtertype:="cgroup"
+	filter := &GenericFilter{
+		FilterAttrs: FilterAttrs{
+			LinkIndex: index,
+			Handle:    handle,
+			Parent:    qdiscHandle,
+			Priority:  10,
+			Protocol:  unix.ETH_P_IP,
+		},
+		FilterType: "cgroup",
+	}
+
+	cFilter := *filter
+	if err := FilterAdd(filter); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cFilter, *filter) {
+		t.Fatalf("U32 %v and %v are not equal", cFilter, *filter)
+	}
+
+	filters, err := FilterList(link, qdiscHandle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filters) != 1 {
+		t.Fatal("Failed to add filter")
+	}
+	_, ok = filters[0].(*GenericFilter)
+	if !ok {
+		t.Fatal("Filter is the wrong type")
+	}
+
+	// fmt.Println(filters)
+	// fmt.Println(cgroup)
+
+	// if err := FilterDel(cgroup); err != nil {
+	// 	t.Fatal(err)
+	// }
+	filterDeleter := &GenericFilter{
+		FilterAttrs: FilterAttrs{
+			LinkIndex: index,
+			Handle:    0,
+			Parent:    qdiscHandle,
+			Priority:  10,
+			Protocol:  unix.ETH_P_IP,
+		},
+		FilterType: "cgroup",
+	}
+	if err := FilterDel(filterDeleter); err != nil {
+		t.Fatal(err)
+	}
+	filters, err = FilterList(link, qdiscHandle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filters) != 0 {
+		t.Fatal("Failed to remove filter")
+	}
+
+	if err := QdiscDel(qdisc); err != nil {
+		t.Fatal(err)
+	}
+	qdiscs, err = SafeQdiscList(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(qdiscs) != 0 {
+		t.Fatal("Failed to remove qdisc")
+	}
+}
+
 func TestFilterAddDel(t *testing.T) {
 	tearDown := setUpNetlinkTest(t)
 	defer tearDown()
